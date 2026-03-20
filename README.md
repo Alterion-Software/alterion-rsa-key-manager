@@ -14,7 +14,7 @@
 [![X25519](https://img.shields.io/badge/X25519-ECDH-blue?style=flat)](https://docs.rs/x25519-dalek)
 [![GitHub](https://img.shields.io/badge/GitHub-Alterion--Software-181717?style=flat&logo=github&logoColor=white)](https://github.com/Alterion-Software)
 
-_X25519 ECDH key store with timed rotation, a 300-second grace window, and HKDF-SHA256 session key derivation — designed as the key exchange layer for the [alterion-enc-pipeline](https://crates.io/crates/alterion-encrypt)._
+_X25519 ECDH key store with timed rotation, a 300-second grace window, and HKDF-SHA256 session key derivation — designed as the key exchange layer for the [alterion-encrypt](https://crates.io/crates/alterion-encrypt)._
 
 ---
 
