@@ -19,6 +19,9 @@ pub struct KeyEntry {
 pub struct KeyStore {
     pub current:  KeyEntry,
     pub previous: Option<KeyEntry>,
+    /// Pre-warmed entry generated `KEY_WARM_LEAD_SECS` before the next rotation.
+    /// The rotation tick consumes this instead of generating a new key on the hot path.
+    pub next:     Option<KeyEntry>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -31,7 +34,8 @@ pub enum EcdhError {
     KeyGenerationFailed(String),
 }
 
-const KEY_GRACE_SECS: u64 = 300;
+const KEY_GRACE_SECS:     u64 = 300;
+const KEY_WARM_LEAD_SECS: u64 = 600;
 
 fn generate_entry(interval_secs: u64) -> KeyEntry {
     let secret     = StaticSecret::random_from_rng(rand::thread_rng());
@@ -55,12 +59,38 @@ pub fn init_key_store(interval_secs: u64) -> Arc<RwLock<KeyStore>> {
     Arc::new(RwLock::new(KeyStore {
         current:  generate_entry(interval_secs),
         previous: None,
+        next:     None,
     }))
 }
 
-/// Spawns a background task that rotates the active key every `interval_secs` seconds and
-/// prunes the previous key once its grace window expires.
+/// Spawns two background tasks:
+/// - **Warm-up**: generates the next key `KEY_WARM_LEAD_SECS` before each rotation and stores it
+///   in `KeyStore::next` so key generation never blocks the hot path.
+/// - **Rotation**: swaps `next` (or falls back to a fresh key) into `current` and retires the old
+///   key to `previous` for the grace-window period.
+/// - **Cleanup**: prunes `previous` once its grace window expires.
 pub fn start_rotation(store: Arc<RwLock<KeyStore>>, interval_secs: u64) {
+    let warm_lead = KEY_WARM_LEAD_SECS.min(interval_secs.saturating_sub(1));
+    let warm_offset = interval_secs.saturating_sub(warm_lead);
+
+    let store_warm    = store.clone();
+    let store_rotate  = store.clone();
+
+    tokio::spawn(async move {
+        let mut warm_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(warm_offset),
+            tokio::time::Duration::from_secs(interval_secs),
+        );
+        loop {
+            warm_interval.tick().await;
+            let next = tokio::task::spawn_blocking(move || generate_entry(interval_secs))
+                .await
+                .expect("key generation panicked");
+            store_warm.write().await.next = Some(next);
+            tracing::debug!("next X25519 key pre-warmed");
+        }
+    });
+
     tokio::spawn(async move {
         let mut rotation_interval = tokio::time::interval_at(
             tokio::time::Instant::now() + tokio::time::Duration::from_secs(interval_secs),
@@ -72,18 +102,20 @@ pub fn start_rotation(store: Arc<RwLock<KeyStore>>, interval_secs: u64) {
         loop {
             tokio::select! {
                 _ = rotation_interval.tick() => {
-                    let new_entry = generate_entry(interval_secs);
-                    let mut w = store.write().await;
+                    let mut w = store_rotate.write().await;
+                    let new_entry = w.next.take().unwrap_or_else(|| generate_entry(interval_secs));
                     let old = std::mem::replace(&mut w.current, new_entry);
                     w.previous = Some(old);
+                    tracing::info!("X25519 key rotated → {}", w.current.key_id);
                 }
                 _ = cleanup_interval.tick() => {
                     let needs_cleanup = {
-                        let r = store.read().await;
+                        let r = store_rotate.read().await;
                         r.previous.as_ref().map_or(false, |p| Utc::now() > p.expires_at)
                     };
                     if needs_cleanup {
-                        store.write().await.previous = None;
+                        store_rotate.write().await.previous = None;
+                        tracing::debug!("previous X25519 key pruned");
                     }
                 }
             }
