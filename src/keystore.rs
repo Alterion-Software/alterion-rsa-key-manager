@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use rsa::{RsaPrivateKey, Oaep};
-use rsa::pkcs8::EncodePublicKey;
-use sha2::Sha256;
+use x25519_dalek::{StaticSecret, PublicKey};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub struct KeyEntry {
     pub key_id:         String,
-    pub public_key_pem: String,
-    pub private_key:    RsaPrivateKey,
+    pub public_key_b64: String,
+    pub public_key_raw: [u8; 32],
+    pub secret:         StaticSecret,
     pub created_at:     DateTime<Utc>,
     pub expires_at:     DateTime<Utc>,
 }
@@ -22,46 +22,40 @@ pub struct KeyStore {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RsaError {
+pub enum EcdhError {
     #[error("key_expired")]
     KeyExpired,
-    #[error("decryption failed: {0}")]
-    DecryptionFailed(String),
+    #[error("invalid client public key")]
+    InvalidClientKey,
     #[error("key generation failed: {0}")]
     KeyGenerationFailed(String),
 }
 
 const KEY_GRACE_SECS: u64 = 300;
 
-#[cfg(test)]
-const KEY_BITS: usize = 1024;
-#[cfg(not(test))]
-const KEY_BITS: usize = 2048;
-
-fn generate_entry(interval_secs: u64) -> Result<KeyEntry, RsaError> {
-    let mut rng = rand::thread_rng();
-    let private_key = RsaPrivateKey::new(&mut rng, KEY_BITS)
-        .map_err(|e| RsaError::KeyGenerationFailed(e.to_string()))?;
-    let public_key = private_key.to_public_key();
-    let public_key_pem = public_key
-        .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-        .map_err(|e| RsaError::KeyGenerationFailed(e.to_string()))?;
-    let now  = Utc::now();
-    let secs = i64::try_from(interval_secs + KEY_GRACE_SECS)
-        .map_err(|_| RsaError::KeyGenerationFailed("interval overflow".into()))?;
-    Ok(KeyEntry {
+fn generate_entry(interval_secs: u64) -> KeyEntry {
+    let secret     = StaticSecret::random_from_rng(rand::thread_rng());
+    let public_key = PublicKey::from(&secret);
+    let raw        = *public_key.as_bytes();
+    let now        = Utc::now();
+    let secs       = i64::try_from(interval_secs + KEY_GRACE_SECS)
+        .expect("interval overflow");
+    KeyEntry {
         key_id:         Uuid::new_v4().to_string(),
-        public_key_pem,
-        private_key,
+        public_key_b64: B64.encode(raw),
+        public_key_raw: raw,
+        secret,
         created_at:     now,
         expires_at:     now + Duration::seconds(secs),
-    })
+    }
 }
 
-/// Generates an initial RSA key pair and wraps it in a shared, RwLock-guarded `KeyStore`.
+/// Generates an initial X25519 key pair and wraps it in a shared, RwLock-guarded `KeyStore`.
 pub fn init_key_store(interval_secs: u64) -> Arc<RwLock<KeyStore>> {
-    let entry = generate_entry(interval_secs).expect("RSA key generation failed at startup");
-    Arc::new(RwLock::new(KeyStore { current: entry, previous: None }))
+    Arc::new(RwLock::new(KeyStore {
+        current:  generate_entry(interval_secs),
+        previous: None,
+    }))
 }
 
 /// Spawns a background task that rotates the active key every `interval_secs` seconds and
@@ -78,14 +72,10 @@ pub fn start_rotation(store: Arc<RwLock<KeyStore>>, interval_secs: u64) {
         loop {
             tokio::select! {
                 _ = rotation_interval.tick() => {
-                    match generate_entry(interval_secs) {
-                        Ok(new_entry) => {
-                            let mut w = store.write().await;
-                            let old = std::mem::replace(&mut w.current, new_entry);
-                            w.previous = Some(old);
-                        }
-                        Err(e) => tracing::error!("RSA rotation failed: {e}"),
-                    }
+                    let new_entry = generate_entry(interval_secs);
+                    let mut w = store.write().await;
+                    let old = std::mem::replace(&mut w.current, new_entry);
+                    w.previous = Some(old);
                 }
                 _ = cleanup_interval.tick() => {
                     let needs_cleanup = {
@@ -101,125 +91,80 @@ pub fn start_rotation(store: Arc<RwLock<KeyStore>>, interval_secs: u64) {
     });
 }
 
-/// Returns the key-id and PEM-encoded public key for the currently active key.
+/// Returns `(key_id, base64_public_key)` for the currently active key.
 pub async fn get_current_public_key(store: &Arc<RwLock<KeyStore>>) -> (String, String) {
     let guard = store.read().await;
-    (guard.current.key_id.clone(), guard.current.public_key_pem.clone())
+    (guard.current.key_id.clone(), guard.current.public_key_b64.clone())
 }
 
-/// Decrypts `cdata` (RSA-OAEP-SHA256) using the key identified by `key_id`.
-/// Falls back to the previous key within its grace window; returns `KeyExpired` otherwise.
-pub async fn decrypt(
-    store:  &Arc<RwLock<KeyStore>>,
-    key_id: &str,
-    cdata:  &[u8],
-) -> Result<Zeroizing<Vec<u8>>, RsaError> {
+/// Performs X25519 ECDH using the server key identified by `key_id` and the client's
+/// ephemeral public key bytes. Returns `(shared_secret, server_public_key_bytes)`.
+///
+/// Falls back to the previous key within its grace window; returns `EcdhError::KeyExpired` otherwise.
+pub async fn ecdh(
+    store:           &Arc<RwLock<KeyStore>>,
+    key_id:          &str,
+    client_pk_bytes: &[u8; 32],
+) -> Result<(Zeroizing<[u8; 32]>, [u8; 32]), EcdhError> {
     let guard = store.read().await;
-    let key = if guard.current.key_id == key_id {
-        &guard.current.private_key
+
+    let entry = if guard.current.key_id == key_id {
+        &guard.current
     } else if let Some(prev) = &guard.previous {
         if prev.key_id == key_id {
             if Utc::now() > prev.expires_at {
-                return Err(RsaError::KeyExpired);
+                return Err(EcdhError::KeyExpired);
             }
-            &prev.private_key
+            prev
         } else {
-            return Err(RsaError::KeyExpired);
+            return Err(EcdhError::KeyExpired);
         }
     } else {
-        return Err(RsaError::KeyExpired);
+        return Err(EcdhError::KeyExpired);
     };
 
-    let padding   = Oaep::new::<Sha256>();
-    let plaintext = key.decrypt(padding, cdata)
-        .map_err(|e| RsaError::DecryptionFailed(e.to_string()))?;
-    Ok(Zeroizing::new(plaintext))
+    let client_public  = PublicKey::from(*client_pk_bytes);
+    let shared         = entry.secret.diffie_hellman(&client_public);
+    let server_pub_raw = entry.public_key_raw;
+
+    Ok((Zeroizing::new(*shared.as_bytes()), server_pub_raw))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsa::pkcs8::{DecodePublicKey, EncodePrivateKey, LineEnding};
-
-    const KEYPAIR_PATH: &str = "/tmp/alterion_test_keypair.json";
-
-    fn client_encrypt(pem: &str, plaintext: &[u8]) -> Vec<u8> {
-        let pub_key = rsa::RsaPublicKey::from_public_key_pem(pem).expect("parse public key PEM");
-        let padding = rsa::Oaep::new::<sha2::Sha256>();
-        pub_key.encrypt(&mut rand::thread_rng(), padding, plaintext)
-            .expect("client-side RSA encrypt")
-    }
 
     #[tokio::test]
-    async fn init_key_store_produces_valid_key_pair() {
-        let store        = init_key_store(3600);
-        let (key_id, pem) = get_current_public_key(&store).await;
-        assert!(!key_id.is_empty());
-        assert!(pem.starts_with("-----BEGIN PUBLIC KEY-----"));
-    }
-
-    #[tokio::test]
-    async fn decrypt_current_key_roundtrip() {
+    async fn init_produces_valid_keypair() {
         let store         = init_key_store(3600);
-        let (key_id, pem) = get_current_public_key(&store).await;
-        let plaintext     = b"aes-key-32-bytes-test-payload!@@";
-        let cdata         = client_encrypt(&pem, plaintext);
-        let decrypted     = decrypt(&store, &key_id, &cdata).await.unwrap();
-        assert_eq!(decrypted.as_slice(), plaintext);
+        let (key_id, b64) = get_current_public_key(&store).await;
+        assert!(!key_id.is_empty());
+        let bytes = B64.decode(&b64).unwrap();
+        assert_eq!(bytes.len(), 32);
     }
 
     #[tokio::test]
-    async fn decrypt_unknown_key_id_returns_expired() {
-        let store  = init_key_store(3600);
-        let dummy  = vec![0u8; 128];
-        let result = decrypt(&store, "nonexistent-key-id", &dummy).await;
-        assert!(matches!(result, Err(RsaError::KeyExpired)));
+    async fn ecdh_roundtrip() {
+        let store = init_key_store(3600);
+        let (key_id, b64) = get_current_public_key(&store).await;
+        let server_pub_bytes: [u8; 32] = B64.decode(&b64).unwrap().try_into().unwrap();
+
+        // Simulate client side
+        let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
+        let client_public = PublicKey::from(&client_secret);
+        let client_shared = client_secret.diffie_hellman(&PublicKey::from(server_pub_bytes));
+
+        // Server side
+        let (server_shared, _) = ecdh(&store, &key_id, client_public.as_bytes()).await.unwrap();
+
+        assert_eq!(client_shared.as_bytes(), server_shared.as_slice());
     }
 
     #[tokio::test]
-    async fn decrypt_with_corrupted_cdata_returns_error() {
-        let store        = init_key_store(3600);
-        let (key_id, _)  = get_current_public_key(&store).await;
-        let bad_cdata    = vec![0xFFu8; 128];
-        let result       = decrypt(&store, &key_id, &bad_cdata).await;
-        assert!(matches!(result, Err(RsaError::DecryptionFailed(_))));
-    }
-
-    #[tokio::test]
-    async fn key_pair_matches() {
-        let store  = init_key_store(3600);
-        let guard  = store.read().await;
-        let entry  = &guard.current;
-        let derived_public = entry.private_key.to_public_key();
-        let derived_pem    = derived_public
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap();
-        let plaintext = b"keypair-match-probe";
-        let cdata     = client_encrypt(&entry.public_key_pem, plaintext);
-        let padding   = rsa::Oaep::new::<sha2::Sha256>();
-        let decrypted = entry.private_key.decrypt(padding, &cdata).unwrap();
-        assert_eq!(entry.public_key_pem, derived_pem);
-        assert_eq!(decrypted.as_slice(), plaintext);
-    }
-
-    #[tokio::test]
-    async fn generate_test_keypair() {
-        let store  = init_key_store(3600);
-        let guard  = store.read().await;
-        let entry  = &guard.current;
-        let private_key_pem = entry.private_key
-            .to_pkcs8_pem(LineEnding::LF)
-            .expect("failed to serialize private key");
-        let json = format!(
-            r#"{{ "key_id": "{}", "private_key_pem": "{}" }}"#,
-            entry.key_id,
-            private_key_pem.as_str().replace('\n', "\\n")
-        );
-        std::fs::write(KEYPAIR_PATH, &json).expect("failed to write keypair file");
-        println!("\n========= PASTE INTO FRONTEND TEST =========");
-        println!("const TEST_KEY_ID = \"{}\";", entry.key_id);
-        println!("const TEST_PEM = `{}`;", entry.public_key_pem);
-        println!("============================================");
-        println!("private key written to: {}", KEYPAIR_PATH);
+    async fn unknown_key_id_returns_expired() {
+        let store = init_key_store(3600);
+        let fake_pk = [0u8; 32];
+        let result = ecdh(&store, "nonexistent", &fake_pk).await;
+        assert!(matches!(result, Err(EcdhError::KeyExpired)));
     }
 }

@@ -1,16 +1,17 @@
 [package]
-name = "alterion-rsa-key-manager"
+name = "alterion-key-exchange"
 version = "0.1.0"
 authors = ["Alterion Software"]
 edition = "2024"
-description = "RSA-2048 key store with timed rotation, grace-window overlap, and OAEP-SHA256 decryption."
+description = "X25519 ECDH key store with timed rotation, grace-window overlap, and HKDF-SHA256 session key derivation."
 license = "GPL-3.0"
-repository = "https://github.com/Alterion-Software/rsa-key-manager"
+repository = "https://github.com/Alterion-Software/alterion-rsa-key-manager"
 
 [dependencies]
-rsa   = { version = "0.9", features = ["sha2"] }
-pkcs8 = { version = "0.10", features = ["alloc", "pkcs5", "encryption"] }
-sha2  = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+sha2    = "0.10"
+hkdf    = "0.12"
+base64  = "0.22"
 
 chrono    = { version = "0.4", features = ["serde"] }
 uuid      = { version = "1", features = ["v4"] }

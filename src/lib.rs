@@ -1,28 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0
-//! # alterion-rsa-key-manager
+//! # alterion-key-exchange
 //!
-//! RSA-2048 key store with timed rotation, a 300-second grace window, and OAEP-SHA256 decryption.
+//! X25519 ECDH key store with timed rotation, a 300-second grace window, and HKDF-SHA256
+//! session key derivation — the key exchange layer for the
+//! [alterion-enc-pipeline](https://crates.io/crates/alterion-enc-pipeline).
 //!
 //! ## Example
 //!
 //! ```rust,no_run
-//! use alterion_rsa_key_manager::{init_key_store, start_rotation, get_current_public_key, decrypt};
+//! use alterion_key_exchange::{init_key_store, start_rotation, get_current_public_key, ecdh};
 //! use actix_web::{web, App, HttpServer, get, HttpResponse};
 //! use std::sync::Arc;
 //! use tokio::sync::RwLock;
-//! use alterion_rsa_key_manager::KeyStore;
+//! use alterion_key_exchange::KeyStore;
 //!
 //! #[get("/api/pubkey")]
 //! async fn pubkey_handler(
 //!     store: web::Data<Arc<RwLock<KeyStore>>>,
 //! ) -> HttpResponse {
-//!     let (key_id, pem) = get_current_public_key(&store).await;
-//!     HttpResponse::Ok().json(serde_json::json!({ "key_id": key_id, "public_key": pem }))
+//!     let (key_id, public_key) = get_current_public_key(&store).await;
+//!     HttpResponse::Ok().json(serde_json::json!({ "key_id": key_id, "public_key": public_key }))
 //! }
 //!
 //! #[actix_web::main]
 //! async fn main() -> std::io::Result<()> {
-//!     // Rotate every hour; previous key stays live for 5 minutes (grace window).
 //!     let store = init_key_store(3600);
 //!     start_rotation(store.clone(), 3600);
 //!
@@ -40,6 +41,6 @@
 pub mod keystore;
 
 pub use keystore::{
-    KeyStore, KeyEntry, RsaError,
-    init_key_store, start_rotation, get_current_public_key, decrypt,
+    KeyStore, KeyEntry, EcdhError,
+    init_key_store, start_rotation, get_current_public_key, ecdh,
 };
