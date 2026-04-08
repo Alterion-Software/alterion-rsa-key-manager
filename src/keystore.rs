@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 use std::sync::Arc;
+use rand_core::OsRng;
 use tokio::sync::RwLock;
 use x25519_dalek::{StaticSecret, PublicKey};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -55,7 +56,7 @@ const KEY_WARM_LEAD_SECS:   u64 = 600;
 const HANDSHAKE_TTL_SECS:   i64 = 60;
 
 fn generate_entry(interval_secs: u64) -> KeyEntry {
-    let secret     = StaticSecret::random_from_rng(rand::thread_rng());
+    let secret     = StaticSecret::random_from_rng(OsRng);
     let public_key = PublicKey::from(&secret);
     let raw        = *public_key.as_bytes();
     let now        = Utc::now();
@@ -91,7 +92,7 @@ pub fn init_handshake_store() -> HandshakeStore {
 /// The private key is consumed and deleted on the first matching [`ecdh_ephemeral`] call.
 /// Any entry not consumed within `HANDSHAKE_TTL_SECS` is pruned by [`prune_handshakes`].
 pub fn init_handshake(hs: &HandshakeStore) -> (String, String) {
-    let secret     = StaticSecret::random_from_rng(rand::thread_rng());
+    let secret     = StaticSecret::random_from_rng(OsRng);
     let public_key = PublicKey::from(&secret);
     let raw        = *public_key.as_bytes();
     let id         = format!("hs_{}", Uuid::new_v4());
@@ -248,7 +249,7 @@ mod tests {
         let server_pub_bytes: [u8; 32] = B64.decode(&b64).unwrap().try_into().unwrap();
 
         // Simulate client side
-        let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
+        let client_secret = StaticSecret::random_from_rng(OsRng);
         let client_public = PublicKey::from(&client_secret);
         let client_shared = client_secret.diffie_hellman(&PublicKey::from(server_pub_bytes));
 
