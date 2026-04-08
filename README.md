@@ -13,6 +13,7 @@
 [![Rust](https://img.shields.io/badge/Rust-2024-orange?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![X25519](https://img.shields.io/badge/X25519-ECDH-blue?style=flat)](https://docs.rs/x25519-dalek)
 [![GitHub](https://img.shields.io/badge/GitHub-Alterion--Software-181717?style=flat&logo=github&logoColor=white)](https://github.com/Alterion-Software)
+[![Socket Badge](https://badge.socket.dev/cargo/package/alterion-ecdh/0.3.0)](https://badge.socket.dev/cargo/package/alterion-ecdh/0.3.0)
 
 _X25519 ECDH key store with timed rotation, a 300-second grace window, and HKDF-SHA256 session key derivation — designed as the key exchange layer for the [alterion-encrypt](https://crates.io/crates/alterion-encrypt)._
 
