@@ -8,7 +8,7 @@
 
 <div align="center">
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/alterion-ecdh.svg)](https://crates.io/crates/alterion-ecdh)
 [![Rust](https://img.shields.io/badge/Rust-2024-orange?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![X25519](https://img.shields.io/badge/X25519-ECDH-blue?style=flat)](https://docs.rs/x25519-dalek)
