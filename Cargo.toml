@@ -4,7 +4,7 @@ version = "1.0.0"
 authors = ["Alterion Software"]
 edition = "2024"
 description = "X25519 ECDH key store with timed rotation, grace-window overlap, and HKDF-SHA256 session key derivation."
-license = "GPL-3.0"
+license = "Apache-2.0"
 repository = "https://github.com/Alterion-Software/alterion-ecdh"
 
 [dependencies]
